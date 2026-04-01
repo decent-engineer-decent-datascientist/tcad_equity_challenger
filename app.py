@@ -4,6 +4,9 @@ import sqlite3
 import json
 import math
 import requests
+import time
+import zipfile
+import io
 import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression
@@ -23,6 +26,7 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
+
 # --- TCAD API FUNCTIONS ---
 def get_tcad_token():
     url = 'https://prod-container.trueprodigyapi.com/trueprodigy/cadpublic/auth/token'
@@ -34,8 +38,7 @@ def get_tcad_token():
     }
     try:
         response = requests.post(url, headers=headers, json={"office": "Travis"}, timeout=10)
-        # BUG FIX: Use response.ok to accept 200 OK, 201 Created, etc.
-        if response.ok: 
+        if response.ok:
             return response.json().get('user', {}).get('token')
         else:
             st.error(f"TCAD Auth Rejected [HTTP {response.status_code}]: {response.text}")
@@ -83,7 +86,6 @@ def fetch_property_card_pdf(token, pid, account_id):
     
     try:
         response = requests.put(url, headers=headers, json=payload, timeout=20)
-        # BUG FIX: Use response.ok here as well just in case!
         if response.ok:
             return response.content
         else:
@@ -91,7 +93,6 @@ def fetch_property_card_pdf(token, pid, account_id):
     except Exception as e:
         st.error(f"Network error fetching PDF from TCAD: {e}")
     return None
-
 
 # --- DATA LOADING ---
 @st.cache_data
@@ -256,7 +257,7 @@ else:
             comps = legal_pool.head(num_comps).copy()
 
 # --- CHART GENERATION HELPER ---
-def build_visuals(final_comps, subject, subject_ratio, target_imprv):
+def build_visuals(final_comps, subject, subject_ratio, target_imprv, median_ratio):
     subj_plot = subject.to_dict()
     subj_plot['streetAddress'] = f"{subj_plot['streetAddress']} (Subject)"
     subj_plot['Adjusted Imprv Value'] = subj_plot['ownerImprovementValue']
@@ -270,6 +271,7 @@ def build_visuals(final_comps, subject, subject_ratio, target_imprv):
 
     plot_df = pd.concat([pd.DataFrame([subj_plot]), comps_plot])
 
+    # 1. Bar Chart (Keep sorted by value for the gap visual)
     plot_df_bar = plot_df.sort_values(by='Adjusted Imprv Value', ascending=True)
     fig_bar = px.bar(
         plot_df_bar, x='streetAddress', y='Adjusted Imprv Value', color='is_subject',
@@ -279,15 +281,23 @@ def build_visuals(final_comps, subject, subject_ratio, target_imprv):
     fig_bar.add_hline(y=target_imprv, line_dash="dash", line_color="green", annotation_text=f"Target Median: ${target_imprv:,.0f}")
     fig_bar.update_layout(showlegend=False)
 
+    # 2. Ratio Chart (SHUFFLED randomly so it doesn't look artificially sorted)
+    plot_df_ratio = plot_df.sample(frac=1, random_state=123) 
+    
     fig_ratio = px.scatter(
-        plot_df, x='streetAddress', y='Assessment Ratio', color='is_subject', size='dot_size',
+        plot_df_ratio, x='streetAddress', y='Assessment Ratio', color='is_subject', size='dot_size',
         color_discrete_map={'Subject Property': '#ef4444', 'Comparable Property': '#3b82f6'},
         labels={'streetAddress': 'Property', 'Assessment Ratio': 'Assessment Ratio (Actual / Predicted)'}
     )
+    # Add the 1.0 Perfect Equity Line
     fig_ratio.add_hline(y=1.0, line_dash="solid", line_color="green", annotation_text="1.0 = Perfect Equity")
+    # Add the target Median Ratio Line
+    fig_ratio.add_hline(y=median_ratio, line_dash="dash", line_color="orange", annotation_text=f"Comp Median ({median_ratio:.2f})")
+    
     fig_ratio.update_yaxes(tickformat=".2f")
     fig_ratio.update_layout(showlegend=True, legend_title_text='')
 
+    # 3. Map
     plot_df['calc_lat'] = None
     plot_df['calc_lon'] = None
     features = []
@@ -368,7 +378,7 @@ if len(comps) > 0:
                 "Adjusted Imprv Value": st.column_config.NumberColumn("Equalized Imprv Value", format="$%d"),
             },
             disabled=list(rename_map.values()) + ["Adjusted Imprv Value", "tcad_link", "Assessment Ratio"],
-            hide_index=True, use_container_width=True
+            hide_index=True, width="stretch"
         )
 
         kept_addresses = edited_df[edited_df['Include'] == True]['Address'].tolist()
@@ -392,7 +402,7 @@ if len(comps) > 0:
 
     # Generate charts only if we have final comps
     if len(final_comps) > 0 and suggested_imprv_value is not None:
-        fig_map, fig_bar, fig_ratio = build_visuals(final_comps, subject, subject_ratio, suggested_imprv_value)
+        fig_map, fig_bar, fig_ratio = build_visuals(final_comps, subject, subject_ratio, suggested_imprv_value, median_comp_ratio)
     else:
         fig_map, fig_bar, fig_ratio = None, None, None
 
@@ -400,14 +410,14 @@ if len(comps) > 0:
     with tab2:
         if fig_map is not None:
             st.markdown("### The Equity Gap (Equalized Value)")
-            st.plotly_chart(fig_bar, use_container_width=True, key="bar_tab2")
+            st.plotly_chart(fig_bar, width="stretch", key="bar_tab2")
             st.divider()
             st.markdown("### The TCAD Assessment Ratio")
-            st.plotly_chart(fig_ratio, use_container_width=True, key="ratio_tab2")
+            st.plotly_chart(fig_ratio, width="stretch", key="ratio_tab2")
             st.divider()
             st.markdown("### Neighborhood Map")
             fig_map.update_layout(height=550)
-            st.plotly_chart(fig_map, use_container_width=True, key="map_tab2")
+            st.plotly_chart(fig_map, width="stretch", key="map_tab2")
 
     # --- TAB 3: METHODOLOGY ---
     with tab3:
@@ -426,6 +436,10 @@ if len(comps) > 0:
     # --- TAB 5: PRINTABLE REPORT ---
     with tab5:
         if len(final_comps) > 0 and suggested_imprv_value is not None:
+            
+            # Shuffle the comps for the printed report to avoid looking artificially cherry-picked
+            shuffled_comps = final_comps.sample(frac=1, random_state=42).copy()
+
             st.info("💡 **Tip:** Press `Ctrl+P` (or `Cmd+P` on Mac) to print this report. The sidebar and tabs will automatically hide.")
             
             st.markdown("<h1 style='text-align: center;'>EVIDENCE PACKET: UNEQUAL APPRAISAL PROTEST</h1>", unsafe_allow_html=True)
@@ -470,37 +484,38 @@ if len(comps) > 0:
             st.divider()
             
             st.markdown("### V. Equity Assessment Ratio Analysis")
+            reduction_pct = (reduction / subject['ownerAppraisedValue']) * 100 if subject['ownerAppraisedValue'] > 0 else 0
             st.write(f"""
             The Assessment Ratio measures the actual appraised value against the model's predicted equitable value. A ratio of 1.0 represents perfect equity. 
 
             As demonstrated in the scatter plot below, the appraisal district has assessed the subject property at **{subject_ratio * 100:.1f}%** of its equitable modeled value. Conversely, the district is consistently assessing the immediate, highly comparable properties at a significantly discounted rate, with a median assessment ratio of **{median_comp_ratio * 100:.1f}%**. 
 
-            To establish true equity and remedy this unequal appraisal, the subject property's valuation must be reduced to reflect the exact same median assessment ratio discount applied to these comparable properties.
+            To establish true equity and remedy this unequal appraisal, the subject property's valuation must be reduced to reflect the exact same median assessment ratio discount applied to these comparable properties. **This equates to a requested reduction of ${reduction:,.0f}, or {reduction_pct:.1f}% of the current assessed value.**
             """)
             fig_ratio.update_layout(height=350, margin={"r": 0, "t": 20, "l": 0, "b": 0})
-            st.plotly_chart(fig_ratio, use_container_width=True, key="ratio_tab5")
+            st.plotly_chart(fig_ratio, width="stretch", key="ratio_tab5")
             st.divider()
 
             st.markdown("### VI. Geographic Neighborhood Map")
             fig_map.update_layout(height=400, margin={"r": 0, "t": 0, "l": 0, "b": 0})
-            st.plotly_chart(fig_map, use_container_width=True, key="map_tab5")
+            st.plotly_chart(fig_map, width="stretch", key="map_tab5")
             st.divider()
 
             st.markdown("### VII. Comparable Analysis Summary")
-            report_table = final_comps[['pAccountID', 'streetAddress', 'livingArea', 'ownerImprovementValue', 'Total Adjustments', 'Adjusted Imprv Value']].copy()
+            report_table = shuffled_comps[['pAccountID', 'streetAddress', 'livingArea', 'ownerImprovementValue', 'Total Adjustments', 'Adjusted Imprv Value']].copy()
             report_table.columns = ['Account ID', 'Address', 'SqFt', 'TCAD Imprv Value', 'Adjustments Applied', 'Equalized Imprv Value']
             st.dataframe(
                 report_table.style.format({
                     'TCAD Imprv Value': '${:,.0f}', 'Adjustments Applied': '${:,.0f}', 'Equalized Imprv Value': '${:,.0f}', 'SqFt': '{:,.0f}'
-                }), hide_index=True, use_container_width=True
+                }), hide_index=True, width="stretch"
             )
             st.divider()
             
             st.markdown("### VIII. Comparable Property Details & Adjustment Ledgers")
             st.write("The following charts detail the specific physical adjustments made to align each comparable property's assessed value with the subject property, following the equations outlined in Section IV.")
             
-            for idx, comp in final_comps.iterrows():
-                st.markdown(f"**Comp:** {comp['streetAddress']} | **Base:** ${comp['ownerImprovementValue']:,.0f} | **Equalized:** ${comp['Adjusted Imprv Value']:,.0f}")
+            for idx, comp in shuffled_comps.iterrows():
+                st.markdown(f"**Comp:** {comp['streetAddress']} | **Base:** \${comp['ownerImprovementValue']:,.0f} | **Equalized:** \${comp['Adjusted Imprv Value']:,.0f}")
                 
                 w_x = ["Base Imprv"]; w_y = [comp['ownerImprovementValue']]; w_measure = ["relative"]
                 w_text = [f"${comp['ownerImprovementValue'] / 1000:.1f}k"]
@@ -526,22 +541,74 @@ if len(comps) > 0:
                     connector={"line": {"color": "rgb(63, 63, 63)"}}
                 ))
                 comp_waterfall.update_layout(height=280, margin={"r": 0, "t": 20, "l": 0, "b": 0})
-                st.plotly_chart(comp_waterfall, use_container_width=True, key=f"waterfall_tab5_{comp['pAccountID']}")
+                st.plotly_chart(comp_waterfall, width="stretch", key=f"waterfall_tab5_{comp['pAccountID']}")
 
             st.divider()
-            st.markdown("### IX. Affirmation")
-            st.write("I affirm that the evidence presented above is derived directly from the Travis Central Appraisal District's certified records and accurately reflects an objective equity analysis.")
-            st.write("")
-            st.write("")
-            st.markdown("**Signature:** ___________________________________________________      **Date:** ___________________")
-            st.write(f"*{subject.get('ownerName', 'Property Owner')}*")
+            # st.markdown("### IX. Affirmation")
+            # st.write("I affirm that the evidence presented above is derived directly from the Travis Central Appraisal District's certified records and accurately reflects an objective equity analysis.")
+            # st.write("")
+            # st.write("")
+            # st.markdown("**Signature:** ___________________________________________________      **Date:** ___________________")
+            # st.write(f"*{subject.get('ownerName', 'Property Owner')}*")
 
     # --- TAB 6: TCAD PROPERTY CARDS ---
     with tab6:
         st.markdown("### 📄 Official TCAD Property Cards")
-        st.write("Download the official Travis Central Appraisal District PDF record for your subject property and all selected comparables. These documents serve as the official, certified baseline data for your evidence packet.")
+        st.write("Download the official Travis Central Appraisal District PDF record for your selected comparables. These documents serve as the certified baseline data for your evidence packet.")
         
         if len(final_comps) > 0:
+            
+            # --- 1. BATCH ZIP DOWNLOAD ---
+            st.markdown("#### Batch Download (Comparables Only)")
+            
+            if 'comps_zip' not in st.session_state:
+                if st.button("🔄 Generate ZIP of All Comparable PDFs", type="primary"):
+                    with st.spinner("Connecting to TCAD Servers..."):
+                        token = get_tcad_token()
+                        if token:
+                            # Start progress bar
+                            progress_text = "Fetching official PDFs from TCAD... Please wait."
+                            my_bar = st.progress(0, text=progress_text)
+                            
+                            zip_buffer = io.BytesIO()
+                            with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+                                total_comps = len(final_comps)
+                                
+                                for i, (idx, prop) in enumerate(final_comps.iterrows()):
+                                    # Update progress UI
+                                    my_bar.progress(i / total_comps, text=f"Fetching {prop['streetAddress']} ({i+1}/{total_comps})...")
+                                    
+                                    # Fetch actual PDF
+                                    pdf_data = fetch_property_card_pdf(token, prop['pID'], prop['pAccountID'])
+                                    if pdf_data:
+                                        clean_address = prop['streetAddress'].replace(" ", "_")
+                                        zip_file.writestr(f"TCAD_Comp_{prop['pAccountID']}_{clean_address}.pdf", pdf_data)
+                                    
+                                    # Be polite to their API so we don't get IP banned
+                                    time.sleep(0.5) 
+                                    
+                                my_bar.progress(1.0, text="✅ All PDFs retrieved and packaged successfully!")
+                                
+                            # Save to session state so it persists without rerunning
+                            st.session_state['comps_zip'] = zip_buffer.getvalue()
+                        else:
+                            st.error("Failed to authenticate with TCAD.")
+            
+            # If the zip exists in state, render the actual download button. 
+            # (This avoids the st.rerun tab reset issue entirely)
+            if 'comps_zip' in st.session_state:
+                st.download_button(
+                    label="⬇️ Download All Comps (ZIP File)",
+                    data=st.session_state['comps_zip'],
+                    file_name="TCAD_Comparable_Evidence.zip",
+                    mime="application/zip",
+                    type="primary"
+                )
+
+            st.divider()
+
+            # --- 2. INDIVIDUAL DOWNLOADS ---
+            st.markdown("#### Individual Property Cards")
             all_properties = pd.concat([pd.DataFrame([subject]), final_comps])
             
             for idx, prop in all_properties.iterrows():
@@ -551,23 +618,29 @@ if len(comps) > 0:
                 col1.markdown(f"**{prop['streetAddress']}** {is_sub}")
                 col1.caption(f"Account ID: {prop['pAccountID']} | PID: {prop['pID']}")
                 
-                # We use a session state variable to store the fetched PDF bytes
-                # so the user doesn't have to re-fetch if the app re-renders.
                 pdf_key = f"pdf_bytes_{prop['pAccountID']}"
                 
                 if pdf_key not in st.session_state:
-                    if col2.button("Retrieve PDF from TCAD", key=f"fetch_btn_{prop['pAccountID']}"):
-                        with st.spinner("Authenticating & Generating PDF..."):
+                    # Same trick here: do the fetching inside the click block, 
+                    # and immediately render the download button to avoid a forced rerun
+                    if col2.button("Retrieve PDF", key=f"fetch_btn_{prop['pAccountID']}"):
+                        with st.spinner("Generating..."):
                             token = get_tcad_token()
                             if token:
                                 pdf_data = fetch_property_card_pdf(token, prop['pID'], prop['pAccountID'])
                                 if pdf_data:
                                     st.session_state[pdf_key] = pdf_data
-                                    st.rerun()
+                                    col3.download_button(
+                                        label="⬇️ Download PDF",
+                                        data=pdf_data,
+                                        file_name=f"TCAD_Card_{prop['pAccountID']}.pdf",
+                                        mime="application/pdf",
+                                        key=f"dl_btn_{prop['pAccountID']}_temp"
+                                    )
                                 else:
                                     st.error("Failed to generate PDF.")
                             else:
-                                st.error("Failed to connect to TCAD servers.")
+                                st.error("Failed to connect.")
                 else:
                     col2.success("✅ PDF Retrieved")
                     col3.download_button(
@@ -575,10 +648,8 @@ if len(comps) > 0:
                         data=st.session_state[pdf_key],
                         file_name=f"TCAD_Card_{prop['pAccountID']}.pdf",
                         mime="application/pdf",
-                        key=f"dl_btn_{prop['pAccountID']}",
-                        type="primary"
+                        key=f"dl_btn_{prop['pAccountID']}"
                     )
-                
                 st.divider()
 else:
     st.warning("No properties match your current filters. Please widen the tolerances in the sidebar.")
