@@ -332,12 +332,11 @@ st.markdown(f"""
     </div>
     <p style="margin:0; color:{MUTED}; font-family:'Outfit',sans-serif; font-size:0.92rem;
               max-width:700px; line-height:1.65;">
-        Generate data-driven evidence to challenge your property taxes under&nbsp;
+        Generate data-driven evidence to challenge your property taxes under 
         <code style="font-family:'DM Mono',monospace; font-size:0.8rem; background:{AMBER}18;
                      color:{AMBER}; padding:2px 8px; border-radius:4px; border:1px solid {AMBER}44;">
-            Tex. Tax Code § 41.43(b)(3)
+            Tex. Tax Code § 41.43(b)(3)—  Unequal Appraisal.
         </code>
-        &nbsp;— Unequal Appraisal.
     </p>
 </div>
 """, unsafe_allow_html=True)
