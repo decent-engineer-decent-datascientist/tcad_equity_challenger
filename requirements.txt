@@ -2,3 +2,6 @@ streamlit==1.56.0
 pandas==3.0.2
 plotly==6.6.0
 scikit-learn==1.8.0
+requests
+tqdm
+openpyxl

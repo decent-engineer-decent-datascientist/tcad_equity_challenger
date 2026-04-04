@@ -7,8 +7,9 @@ import random
 from tqdm import tqdm
 
 # --- CONFIGURATION ---
-INPUT_FILE = 'export.xlsx'
-OUTPUT_DIR = 'scraped_data' 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+INPUT_FILE = os.path.join(PROJECT_ROOT, 'export.xlsx')
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'scraped_data')
 OFFICE = "Travis"
 BASE_URL = "https://prod-container.trueprodigyapi.com"
 

@@ -1,8 +1,10 @@
+import os
 import sqlite3
 import pandas as pd
 pd.set_option('display.max_columns', None)
 
-DB_NAME = "tcad_data.db"
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_NAME = os.path.join(PROJECT_ROOT, "tcad_data.db")
 
 def verify_database():
     print(f"Connecting to {DB_NAME}...\n")

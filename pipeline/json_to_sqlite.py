@@ -4,8 +4,9 @@ import json
 import sqlite3
 import pandas as pd
 
-JSON_DIRECTORY = "scraped_data" 
-DB_NAME = "tcad_data.db"
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+JSON_DIRECTORY = os.path.join(PROJECT_ROOT, "scraped_data")
+DB_NAME = os.path.join(PROJECT_ROOT, "tcad_data.db")
 
 def append_to_sql(df, table_name, conn):
     """Helper function to append a dataframe to SQLite safely."""
