@@ -4,14 +4,20 @@ import time
 import json
 import os
 import random
+import sys
 from tqdm import tqdm
 
 # --- CONFIGURATION ---
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
+from config import get_county_config
+
+COUNTY_CONFIG = get_county_config("Travis")
 INPUT_FILE = os.path.join(PROJECT_ROOT, 'export.xlsx')
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'scraped_data')
-OFFICE = "Travis"
-BASE_URL = "https://prod-container.trueprodigyapi.com"
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, COUNTY_CONFIG["scraped_data_dir"])
+OFFICE = COUNTY_CONFIG["office"]
+BASE_URL = COUNTY_CONFIG["api_base"]
+ORIGIN = COUNTY_CONFIG["origin"]
 
 # Stealth Settings
 MIN_DELAY = 2.5  
@@ -39,8 +45,8 @@ def log(msg):
 def get_random_headers(token=None):
     headers = {
         "Accept": "*/*",
-        "Origin": "https://travis.prodigycad.com",
-        "Referer": "https://travis.prodigycad.com/",
+        "Origin": ORIGIN,
+        "Referer": f"{ORIGIN}/",
         "User-Agent": random.choice(USER_AGENTS)
     }
     if token:

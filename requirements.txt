@@ -5,3 +5,4 @@ scikit-learn==1.8.0
 requests
 tqdm
 openpyxl
+beautifulsoup4

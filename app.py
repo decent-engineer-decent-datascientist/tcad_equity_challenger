@@ -3,6 +3,7 @@ import pandas as pd
 import sqlite3
 import json
 import math
+import os
 import requests
 import time
 import zipfile
@@ -10,9 +11,12 @@ import io
 import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression
+from config import COUNTIES, get_county_config, DEFAULT_YEAR
+
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="TCAD Equity Challenger", layout="wide",
+st.set_page_config(page_title="Equity Appraisal Challenger", layout="wide",
                    page_icon="⚖️")
 
 # # --- PRINT CSS HACK ---
@@ -35,32 +39,39 @@ st.set_page_config(page_title="TCAD Equity Challenger", layout="wide",
 # </style>
 # """, unsafe_allow_html=True)
 
-# --- TCAD API FUNCTIONS ---
-def get_tcad_token():
-    url = 'https://prod-container.trueprodigyapi.com/trueprodigy/cadpublic/auth/token'
+# --- TCAD API FUNCTIONS (Travis County only) ---
+def get_tcad_token(county_config):
+    api_base = county_config["api_base"]
+    origin = county_config["origin"]
+    office = county_config["office"]
+    url = f'{api_base}/trueprodigy/cadpublic/auth/token'
     headers = {
         'Content-Type': 'application/json',
-        'Origin': 'https://travis.prodigycad.com',
-        'Referer': 'https://travis.prodigycad.com/',
+        'Origin': origin,
+        'Referer': f'{origin}/',
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
     }
     try:
-        response = requests.post(url, headers=headers, json={"office": "Travis"}, timeout=10)
+        response = requests.post(url, headers=headers, json={"office": office}, timeout=10)
         if response.ok:
             return response.json().get('user', {}).get('token')
         else:
-            st.error(f"TCAD Auth Rejected [HTTP {response.status_code}]: {response.text}")
+            st.error(f"Auth Rejected [HTTP {response.status_code}]: {response.text}")
     except Exception as e:
-        st.error(f"Network error connecting to TCAD Auth: {e}")
+        st.error(f"Network error connecting to Auth: {e}")
     return None
 
-def fetch_property_card_pdf(token, pid, account_id):
-    url = 'https://prod-container.trueprodigyapi.com/public/runreport'
+def fetch_property_card_pdf(token, pid, account_id, county_config):
+    api_base = county_config["api_base"]
+    origin = county_config["origin"]
+    tp_database = county_config["tp_database"]
+    tp_office_name = county_config["tp_office_name"]
+    url = f'{api_base}/public/runreport'
     headers = {
         'Content-Type': 'application/json',
         'Authorization': token,
-        'Origin': 'https://travis.prodigycad.com',
-        'Referer': 'https://travis.prodigycad.com/',
+        'Origin': origin,
+        'Referer': f'{origin}/',
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
     }
     
@@ -79,11 +90,11 @@ def fetch_property_card_pdf(token, pid, account_id):
             "outputFormat": "pdf",
             "parameters": {
                 "reportParameter": [
-                    {"name": "TP_DATABASE", "value": ["travis_appraisal"]},
-                    {"name": "TP_OFFICE_NAME", "value": ["travis"]},
-                    {"name": "TP_SELECTED_QUERY", "value": [f"pid = {pid} and pYear = 2026 limit 1"]},
+                    {"name": "TP_DATABASE", "value": [tp_database]},
+                    {"name": "TP_OFFICE_NAME", "value": [tp_office_name]},
+                    {"name": "TP_SELECTED_QUERY", "value": [f"pid = {pid} and pYear = {DEFAULT_YEAR} limit 1"]},
                     {"name": "TP_SELECTED_PID", "value": [int(pid)]},
-                    {"name": "TP_SELECTED_PYEAR", "value": ["2026"]},
+                    {"name": "TP_SELECTED_PYEAR", "value": [DEFAULT_YEAR]},
                     {"name": "TP_ACCOUNT_ID", "value": [int(account_id)]},
                     {"name": "TP_SHOW_PROTEST", "value": ["true"]},
                     {"name": "TP_SHOW_ZONING", "value": [""]}
@@ -98,7 +109,7 @@ def fetch_property_card_pdf(token, pid, account_id):
             if response.content.startswith(b'%PDF'):
                 return response.content
             else:
-                st.error("TCAD Firewall blocked the request from this cloud server IP address.")
+                st.error("Firewall blocked the request from this cloud server IP address.")
                 return None
         else:
             st.error(f"TCAD PDF Rejected [HTTP {response.status_code}]: {response.text[:200]}")
@@ -108,15 +119,32 @@ def fetch_property_card_pdf(token, pid, account_id):
 
 # --- DATA LOADING ---
 @st.cache_data
-def load_data():
-    conn = sqlite3.connect("tcad_data.db")
-    query = """
+def load_data(db_file, has_parcel_data, property_link_base, link_format, county_type):
+    db_path = os.path.join(PROJECT_ROOT, db_file)
+    conn = sqlite3.connect(db_path)
+
+    # Check which tables exist
+    existing_tables = pd.read_sql_query(
+        "SELECT name FROM sqlite_master WHERE type='table'", conn
+    )['name'].tolist()
+
+    parcel_join = ""
+    parcel_select = "NULL as geometry,"
+    if has_parcel_data and "parcel" in existing_tables:
+        parcel_join = "LEFT JOIN parcel p ON g.pAccountID = p.pAccountID"
+        parcel_select = "p.geometry,"
+
+    # Check which columns exist in general table
+    general_cols = pd.read_sql_query("PRAGMA table_info(general)", conn)['name'].tolist()
+    name_secondary_select = "g.nameSecondary AS ownerNameSecondary," if "nameSecondary" in general_cols else "NULL AS ownerNameSecondary,"
+
+    query = f"""
         SELECT
-            g.pAccountID, g.pID, g.name AS ownerName, g.nameSecondary AS ownerNameSecondary,
-            g.streetAddress, g.legalDescription, g.geoID,
+            g.pAccountID, g.pID, g.name AS ownerName, {name_secondary_select}
+            g.streetAddress, g.legalDescription, g.geoID, g.marketArea,
             v.ownerAppraisedValue, v.ownerImprovementValue, v.ownerLandValue,
             i.livingArea, i.imprvSpecificDescription, l.sizeSqft as lotSizeSqft,
-            MAX(d.actualYearBuilt) as yearBuilt, p.geometry,
+            MAX(d.actualYearBuilt) as yearBuilt, {parcel_select}
             MAX(CASE WHEN d.detailTypeDescription = 'BATHROOM' THEN d.area ELSE 0 END) as bath_count,
             MAX(CASE WHEN d.detailTypeDescription = 'HALF BATHROOM' THEN d.area ELSE 0 END) as half_bath_count,
             MAX(CASE WHEN d.detailTypeDescription = 'BEDROOMS' THEN d.area ELSE 0 END) as bed_count,
@@ -130,7 +158,7 @@ def load_data():
         LEFT JOIN improvement i ON g.pAccountID = i.pAccountID
         LEFT JOIN land l ON g.pAccountID = l.pAccountID
         LEFT JOIN improvement_details d ON g.pAccountID = d.pAccountID
-        LEFT JOIN parcel p ON g.pAccountID = p.pAccountID
+        {parcel_join}
         GROUP BY g.pAccountID
     """
     df = pd.read_sql_query(query, conn)
@@ -146,20 +174,61 @@ def load_data():
 
     df = df.dropna(subset=['livingArea', 'yearBuilt', 'streetAddress'])
     df = df[df['ownerAppraisedValue'] > 0]
+    df = df[df['ownerImprovementValue'] > 0]
+    df = df[df['livingArea'] > 0]
     df['PricePerSqFt'] = df['ownerImprovementValue'] / df['livingArea']
     df['pAccountID'] = df['pAccountID'].astype(str)
-    df['tcad_link'] = "https://travis.prodigycad.com/property-detail/" + df['pID'].astype(str) + "/2026"
+
+    # Build property links dynamically per county
+    if county_type == "api":
+        # TCAD: base/pID/year
+        df['property_link'] = property_link_base + "/" + df['pID'].astype(str) + "/" + DEFAULT_YEAR
+    else:
+        # WCAD: already has pAccountID as PropertyQuickRefID
+        df['property_link'] = property_link_base + "/" + df['pAccountID'] + "/PartyQuickRefID/0/SearchTaxYear/" + DEFAULT_YEAR
 
     if 'ownerName' in df.columns:
         builders = ['TOLL', 'TAYLOR MORRISON', 'PULTE', 'LENNAR', 'DR HORTON', 'D R HORTON', 'MERITAGE', 'KB HOME', 'ASHTON WOODS', 'PERRY HOMES']
         pattern = '|'.join(builders)
         mask_primary = df['ownerName'].astype(str).str.upper().str.contains(pattern, na=False)
-        mask_secondary = df['ownerNameSecondary'].astype(str).str.upper().str.contains(pattern, na=False)
-        df = df[~(mask_primary | mask_secondary)]
+        mask_combined = mask_primary
+        if 'ownerNameSecondary' in df.columns and df['ownerNameSecondary'].notna().any():
+            mask_secondary = df['ownerNameSecondary'].astype(str).str.upper().str.contains(pattern, na=False)
+            mask_combined = mask_primary | mask_secondary
+        df = df[~mask_combined]
 
     return df
 
-df = load_data()
+# --- COUNTY SELECTOR (must come before load_data) ---
+county_names = list(COUNTIES.keys())
+# Only show counties whose DB files exist
+available_counties = [c for c in county_names if os.path.exists(os.path.join(PROJECT_ROOT, COUNTIES[c]["db_file"]))]
+if not available_counties:
+    st.error("No county databases found. Run the scraper and json_to_sqlite pipeline first.")
+    st.stop()
+selected_county = st.sidebar.selectbox("County:", available_counties)
+county_cfg = get_county_config(selected_county)
+
+df = load_data(county_cfg["db_file"], county_cfg["has_parcel_data"],
+               county_cfg["property_link_base"], county_cfg["link_format"],
+               county_cfg["type"])
+
+short_name = county_cfg["short_name"]
+has_parcel = county_cfg["has_parcel_data"]
+has_pdf_cards = county_cfg["has_pdf_cards"]
+
+# --- NEIGHBORHOOD FILTER ---
+if 'marketArea' in df.columns and df['marketArea'].notna().any():
+    neighborhoods = sorted(df['marketArea'].dropna().unique())
+    if len(neighborhoods) > 1:
+        selected_neighborhoods = st.sidebar.multiselect(
+            "Neighborhood:", neighborhoods, default=neighborhoods
+        )
+        if selected_neighborhoods:
+            df = df[df['marketArea'].isin(selected_neighborhoods)]
+        else:
+            st.sidebar.warning("Select at least one neighborhood.")
+            st.stop()
 
 # --- STATE MANAGEMENT ---
 # Track user-excluded comps so exclusions persist when switching tabs/modes
@@ -338,7 +407,7 @@ def build_visuals(final_comps, subject, subject_ratio, target_imprv, median_rati
 # --- INTERACTIVE DASHBOARD MODE ---
 if app_mode == "Interactive Dashboard":
     st.info("💡 **Tip:** Be sure to select your specific address from the sidebar")
-    st.title("⚖️ TCAD Equity Appraisal Challenger")
+    st.title(f"⚖️ {short_name} Equity Appraisal Challenger")
     
     st.subheader("Subject Property Details")
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -350,13 +419,16 @@ if app_mode == "Interactive Dashboard":
     st.divider()
 
     if len(comps) > 0:
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
-            "📋 1. Comp Selection", "🗺️ 2. Visuals & Ratios", "⚖️ 3. Methodology", "🔍 4. Export", "📄 5. TCAD Property Cards"
-        ])
+        tab_names = ["📋 1. Comp Selection", "📊 2. Visuals & Ratios", "⚖️ 3. Methodology", "🔍 4. Export"]
+        if has_pdf_cards:
+            tab_names.append(f"📄 5. {short_name} Property Cards")
+        tabs = st.tabs(tab_names)
+        tab1, tab2, tab3, tab4 = tabs[0], tabs[1], tabs[2], tabs[3]
+        tab5 = tabs[4] if has_pdf_cards else None
 
         with tab1:
             st.markdown("### Evidence Review & Selection")
-            display_cols = ['tcad_link', 'streetAddress', 'yearBuilt', 'livingArea', 'ownerAppraisedValue', 'ownerImprovementValue', 'Assessment Ratio', 'Adjusted Imprv Value']
+            display_cols = ['property_link', 'streetAddress', 'yearBuilt', 'livingArea', 'ownerAppraisedValue', 'ownerImprovementValue', 'Assessment Ratio', 'Adjusted Imprv Value']
             editor_df = comps[display_cols].copy()
             
             # Map exclusions from session state
@@ -369,11 +441,11 @@ if app_mode == "Interactive Dashboard":
                 editor_df,
                 column_config={
                     "Include": st.column_config.CheckboxColumn("Include", default=True),
-                    "tcad_link": st.column_config.LinkColumn("TCAD", display_text="View"),
+                    "property_link": st.column_config.LinkColumn(short_name, display_text="View"),
                     "Assessment Ratio": st.column_config.NumberColumn("Assessment Ratio", format="%.2f"),
                     "Adjusted Imprv Value": st.column_config.NumberColumn("Equalized Imprv Value", format="$%d"),
                 },
-                disabled=list(rename_map.values()) + ["Adjusted Imprv Value", "tcad_link", "Assessment Ratio"],
+                disabled=list(rename_map.values()) + ["Adjusted Imprv Value", "property_link", "Assessment Ratio"],
                 hide_index=True, width="stretch"
             )
             
@@ -393,7 +465,7 @@ if app_mode == "Interactive Dashboard":
                 if reduction > 0:
                     st.success(f"Based on **{len(final_comps)}** selected properties, your target Equalized Total Value is **${suggested_total_value:,.0f}**.\n\nProposed Reduction: **${reduction:,.0f}**.")
                 else:
-                    st.error(f"Based on the selected properties, TCAD's valuation appears equitable. Target value: **${suggested_total_value:,.0f}**.")
+                    st.error(f"Based on the selected properties, {short_name}'s valuation appears equitable. Target value: **${suggested_total_value:,.0f}**.")
             else:
                 st.warning("Please include at least one property.")
 
@@ -408,23 +480,24 @@ if app_mode == "Interactive Dashboard":
                 st.markdown("### The Equity Gap (Equalized Value)")
                 st.plotly_chart(fig_bar, width="stretch", key="bar_tab2")
                 st.divider()
-                st.markdown("### The TCAD Assessment Ratio")
+                st.markdown(f"### The {short_name} Assessment Ratio")
                 st.plotly_chart(fig_ratio, width="stretch", key="ratio_tab2")
-                st.divider()
-                st.markdown("### Neighborhood Map")
-                fig_map.update_layout(height=550)
-                st.plotly_chart(fig_map, width="stretch", key="map_tab2")
+                if has_parcel:
+                    st.divider()
+                    st.markdown("### Neighborhood Map")
+                    fig_map.update_layout(height=550)
+                    st.plotly_chart(fig_map, width="stretch", key="map_tab2")
 
         with tab3:
             st.markdown("### Equity Adjustment Methodology (Hedonic Pricing Model)")
-            st.write("To ensure an objective comparison, the engine utilizes a **Multivariate Hedonic Pricing Model** to isolate the marginal contributory value of specific property characteristics. This approach mathematically eliminates subjective appraiser bias by deriving adjustment values directly from TCAD's own neighborhood data.")
+            st.write(f"To ensure an objective comparison, the engine utilizes a **Multivariate Hedonic Pricing Model** to isolate the marginal contributory value of specific property characteristics. This approach mathematically eliminates subjective appraiser bias by deriving adjustment values directly from {short_name}'s own neighborhood data.")
             
             st.markdown("#### Step 1: Defining the Neighborhood Baseline")
             st.write("An Ordinary Least Squares (OLS) regression is performed on the universe of relevant neighborhood properties to determine the baseline value equation:")
             st.latex(r"\hat{V}_{imprv} = \beta_0 + \beta_1(\text{SqFt}) + \beta_2(\text{Age}) + \beta_3(\text{Baths}) + \dots + \epsilon")
             
             st.markdown("#### Step 2: Extracting Objective Adjustment Rates")
-            st.write("The extracted $\\beta$ coefficients represent precisely how much TCAD penalizes or rewards physical differences in your specific subdivision (e.g., the assessed value of one additional square foot or bathroom).")
+            st.write(f"The extracted $\\beta$ coefficients represent precisely how much {short_name} penalizes or rewards physical differences in your specific subdivision (e.g., the assessed value of one additional square foot or bathroom).")
             if mode == "Tax Advocate Strategy (Recommended)" and len(final_comps) > 0:
                 coef_df = pd.DataFrame([coefs]).T.reset_index()
                 coef_df.columns = ['Feature', 'Extracted Value ($)']
@@ -434,76 +507,77 @@ if app_mode == "Interactive Dashboard":
             st.write("These coefficients are applied to the physical deltas between the Subject Property and the Comparable Properties to calculate precise adjustments:")
             st.latex(r"Adj_i = (\text{Subject}_i - \text{Comp}_i) \times \beta_i")
             st.write("These adjustments are summed and applied to the comparable property's base assessment to yield the **Equalized Improvement Value** (the assessed value of the comparable property as if it were physically identical to the subject):")
-            st.latex(r"\text{Equalized Value}_{comp} = \text{Base TCAD Value}_{comp} + \sum Adj_i")
+            st.latex(r"\text{Equalized Value}_{comp} = \text{Base " + short_name + r" Value}_{comp} + \sum Adj_i")
 
         with tab4:
             st.markdown("### 📥 Download Evidence Report")
             if len(final_comps) > 0:
-                export_cols = ['pAccountID', 'tcad_link', 'ownerName', 'streetAddress', 'legalDescription', 'yearBuilt', 'livingArea', 'lotSizeSqft', 'ownerAppraisedValue', 'PricePerSqFt']
+                export_cols = ['pAccountID', 'property_link', 'ownerName', 'streetAddress', 'legalDescription', 'yearBuilt', 'livingArea', 'lotSizeSqft', 'ownerAppraisedValue', 'PricePerSqFt']
                 if 'Total Adjustments' in final_comps.columns:
                     export_cols.extend([f"{f}_adj" for f in hedonic_features] + ['Total Adjustments', 'Adjusted Imprv Value'])
                 export_df = final_comps[export_cols].copy()
-                st.download_button(label="Download Full Evidence Report (CSV)", data=export_df.to_csv(index=False).encode('utf-8'), file_name='tcad_equity_evidence.csv', mime='text/csv', type="primary")
+                st.download_button(label="Download Full Evidence Report (CSV)", data=export_df.to_csv(index=False).encode('utf-8'), file_name=f'{short_name.lower()}_equity_evidence.csv', mime='text/csv', type="primary")
 
-        with tab5:
-            st.markdown("### 📄 Official TCAD Property Cards")
-            st.write("Download the official Travis Central Appraisal District PDF record for your selected comparables. These documents serve as the certified baseline data for your evidence packet.")
-            
-            if len(final_comps) > 0:
-                st.markdown("#### Batch Download (Comparables Only)")
-                if 'comps_zip' not in st.session_state:
-                    if st.button("🔄 Generate ZIP of All Comparable PDFs", type="primary"):
-                        with st.spinner("Connecting to TCAD Servers..."):
-                            token = get_tcad_token()
-                            if token:
-                                my_bar = st.progress(0, text="Fetching official PDFs from TCAD... Please wait.")
-                                zip_buffer = io.BytesIO()
-                                with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                                    total_comps = len(final_comps)
-                                    for i, (idx, prop) in enumerate(final_comps.iterrows()):
-                                        my_bar.progress(i / total_comps, text=f"Fetching {prop['streetAddress']} ({i+1}/{total_comps})...")
-                                        pdf_data = fetch_property_card_pdf(token, prop['pID'], prop['pAccountID'])
-                                        if pdf_data:
-                                            clean_address = prop['streetAddress'].replace(" ", "_")
-                                            zip_file.writestr(f"TCAD_Comp_{prop['pAccountID']}_{clean_address}.pdf", pdf_data)
-                                        time.sleep(0.5) 
-                                    my_bar.progress(1.0, text="✅ All PDFs retrieved and packaged successfully!")
-                                st.session_state['comps_zip'] = zip_buffer.getvalue()
-                            else:
-                                st.error("Failed to authenticate with TCAD.")
+        if tab5 is not None:
+            with tab5:
+                st.markdown(f"### 📄 Official {short_name} Property Cards")
+                st.write(f"Download the official {county_cfg['display_name']} PDF record for your selected comparables. These documents serve as the certified baseline data for your evidence packet.")
                 
-                if 'comps_zip' in st.session_state:
-                    st.download_button(label="⬇️ Download All Comps (ZIP File)", data=st.session_state['comps_zip'], file_name="TCAD_Comparable_Evidence.zip", type="primary")
-
-                st.divider()
-                st.markdown("#### Individual Property Cards")
-                all_properties = pd.concat([pd.DataFrame([subject]), final_comps])
-                
-                for idx, prop in all_properties.iterrows():
-                    col1, col2, col3 = st.columns([4, 2, 2])
-                    is_sub = "⭐ (Subject Property)" if prop['pAccountID'] == subject['pAccountID'] else ""
-                    col1.markdown(f"**{prop['streetAddress']}** {is_sub}")
-                    col1.caption(f"Account ID: {prop['pAccountID']} | PID: {prop['pID']}")
-                    
-                    pdf_key = f"pdf_bytes_{prop['pAccountID']}"
-                    
-                    if pdf_key not in st.session_state:
-                        if col2.button("Retrieve PDF", key=f"fetch_btn_{prop['pAccountID']}"):
-                            with st.spinner("Generating..."):
-                                token = get_tcad_token()
+                if len(final_comps) > 0:
+                    st.markdown("#### Batch Download (Comparables Only)")
+                    if 'comps_zip' not in st.session_state:
+                        if st.button("🔄 Generate ZIP of All Comparable PDFs", type="primary"):
+                            with st.spinner(f"Connecting to {short_name} Servers..."):
+                                token = get_tcad_token(county_cfg)
                                 if token:
-                                    pdf_data = fetch_property_card_pdf(token, prop['pID'], prop['pAccountID'])
-                                    if pdf_data:
-                                        st.session_state[pdf_key] = pdf_data
-                                        col3.download_button(label="⬇️ Download PDF", data=pdf_data, file_name=f"TCAD_Card_{prop['pAccountID']}.pdf", key=f"dl_btn_{prop['pAccountID']}_temp")
-                                    else:
-                                        st.error("Failed to generate PDF.")
+                                    my_bar = st.progress(0, text=f"Fetching official PDFs from {short_name}... Please wait.")
+                                    zip_buffer = io.BytesIO()
+                                    with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+                                        total_comps = len(final_comps)
+                                        for i, (idx, prop) in enumerate(final_comps.iterrows()):
+                                            my_bar.progress(i / total_comps, text=f"Fetching {prop['streetAddress']} ({i+1}/{total_comps})...")
+                                            pdf_data = fetch_property_card_pdf(token, prop['pID'], prop['pAccountID'], county_cfg)
+                                            if pdf_data:
+                                                clean_address = prop['streetAddress'].replace(" ", "_")
+                                                zip_file.writestr(f"{short_name}_Comp_{prop['pAccountID']}_{clean_address}.pdf", pdf_data)
+                                            time.sleep(0.5) 
+                                        my_bar.progress(1.0, text="✅ All PDFs retrieved and packaged successfully!")
+                                    st.session_state['comps_zip'] = zip_buffer.getvalue()
                                 else:
-                                    st.error("Failed to connect.")
-                    else:
-                        col2.success("✅ PDF Retrieved")
-                        col3.download_button(label="⬇️ Download PDF File", data=st.session_state[pdf_key], file_name=f"TCAD_Card_{prop['pAccountID']}.pdf", key=f"dl_btn_{prop['pAccountID']}")
+                                    st.error(f"Failed to authenticate with {short_name}.")
+                    
+                    if 'comps_zip' in st.session_state:
+                        st.download_button(label="⬇️ Download All Comps (ZIP File)", data=st.session_state['comps_zip'], file_name=f"{short_name}_Comparable_Evidence.zip", type="primary")
+
                     st.divider()
+                    st.markdown("#### Individual Property Cards")
+                    all_properties = pd.concat([pd.DataFrame([subject]), final_comps])
+                    
+                    for idx, prop in all_properties.iterrows():
+                        col1, col2, col3 = st.columns([4, 2, 2])
+                        is_sub = "⭐ (Subject Property)" if prop['pAccountID'] == subject['pAccountID'] else ""
+                        col1.markdown(f"**{prop['streetAddress']}** {is_sub}")
+                        col1.caption(f"Account ID: {prop['pAccountID']} | PID: {prop['pID']}")
+                        
+                        pdf_key = f"pdf_bytes_{prop['pAccountID']}"
+                        
+                        if pdf_key not in st.session_state:
+                            if col2.button("Retrieve PDF", key=f"fetch_btn_{prop['pAccountID']}"):
+                                with st.spinner("Generating..."):
+                                    token = get_tcad_token(county_cfg)
+                                    if token:
+                                        pdf_data = fetch_property_card_pdf(token, prop['pID'], prop['pAccountID'], county_cfg)
+                                        if pdf_data:
+                                            st.session_state[pdf_key] = pdf_data
+                                            col3.download_button(label="⬇️ Download PDF", data=pdf_data, file_name=f"{short_name}_Card_{prop['pAccountID']}.pdf", key=f"dl_btn_{prop['pAccountID']}_temp")
+                                        else:
+                                            st.error("Failed to generate PDF.")
+                                    else:
+                                        st.error("Failed to connect.")
+                        else:
+                            col2.success("✅ PDF Retrieved")
+                            col3.download_button(label="⬇️ Download PDF File", data=st.session_state[pdf_key], file_name=f"{short_name}_Card_{prop['pAccountID']}.pdf", key=f"dl_btn_{prop['pAccountID']}")
+                        st.divider()
 
 
 # --- PRINTABLE REPORT MODE ---
@@ -542,7 +616,7 @@ elif app_mode == "Printable Report":
 
         st.markdown("### II. Requested Valuation")
         req_col1, req_col2, req_col3 = st.columns(3)
-        req_col1.metric("Current TCAD Total Value", f"${subject['ownerAppraisedValue']:,.0f}")
+        req_col1.metric(f"Current {short_name} Total Value", f"${subject['ownerAppraisedValue']:,.0f}")
         req_col2.metric("Target Equalized Total Value", f"${suggested_total_value:,.0f}")
         req_col3.metric("Reduction Requested", f"${reduction:,.0f}" if reduction > 0 else "$0")
         st.divider()
@@ -567,7 +641,7 @@ elif app_mode == "Printable Report":
         st.write("The extracted $\\beta$ coefficients are applied to the physical deltas between the Subject Property and the Comparable Properties to calculate precise adjustments:")
         st.latex(r"Adj_i = (\text{Subject}_i - \text{Comp}_i) \times \beta_i")
         st.write("These adjustments are summed and applied to the comparable property's base assessment to yield the **Equalized Improvement Value** (the assessed value of the comparable property as if it were physically identical to the subject):")
-        st.latex(r"\text{Equalized Value}_{comp} = \text{Base TCAD Value}_{comp} + \sum Adj_i")
+        st.latex(r"\text{Equalized Value}_{comp} = \text{Base " + short_name + r" Value}_{comp} + \sum Adj_i")
         st.divider()
         
         st.markdown("### V. Equity Assessment Ratio Analysis")
@@ -584,22 +658,25 @@ elif app_mode == "Printable Report":
     config={'responsive': True})
         st.divider()
 
-        st.markdown("### VI. Geographic Neighborhood Map")
-        fig_map.update_layout(height=400, margin={"r": 0, "t": 0, "l": 0, "b": 0})
-        st.plotly_chart(fig_map, width="stretch", key="map_tab5")
-        st.divider()
+        if has_parcel:
+            st.markdown("### VI. Geographic Neighborhood Map")
+            fig_map.update_layout(height=400, margin={"r": 0, "t": 0, "l": 0, "b": 0})
+            st.plotly_chart(fig_map, width="stretch", key="map_tab5")
+            st.divider()
 
-        st.markdown("### VII. Comparable Analysis Summary")
+        section_num = "VII" if has_parcel else "VI"
+        st.markdown(f"### {section_num}. Comparable Analysis Summary")
         report_table = shuffled_comps[['pAccountID', 'streetAddress', 'livingArea', 'ownerImprovementValue', 'Total Adjustments', 'Adjusted Imprv Value']].copy()
-        report_table.columns = ['Account ID', 'Address', 'SqFt', 'TCAD Imprv Value', 'Adjustments Applied', 'Equalized Imprv Value']
+        report_table.columns = ['Account ID', 'Address', 'SqFt', f'{short_name} Imprv Value', 'Adjustments Applied', 'Equalized Imprv Value']
         st.dataframe(
             report_table.style.format({
-                'TCAD Imprv Value': '${:,.0f}', 'Adjustments Applied': '${:,.0f}', 'Equalized Imprv Value': '${:,.0f}', 'SqFt': '{:,.0f}'
+                f'{short_name} Imprv Value': '${:,.0f}', 'Adjustments Applied': '${:,.0f}', 'Equalized Imprv Value': '${:,.0f}', 'SqFt': '{:,.0f}'
             }), hide_index=True, width="stretch"
         )
         st.divider()
         
-        st.markdown("### VIII. Comparable Property Details & Adjustment Ledgers")
+        detail_section = "VIII" if has_parcel else "VII"
+        st.markdown(f"### {detail_section}. Comparable Property Details & Adjustment Ledgers")
         st.write("The following charts detail the specific physical adjustments made to align each comparable property's assessed value with the subject property, following the equations outlined in Section IV.")
         
         for idx, comp in shuffled_comps.iterrows():

@@ -1,18 +1,22 @@
+import argparse
 import os
 import json
 import glob
 import shutil
+import sys
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'scraped_data')
+sys.path.insert(0, PROJECT_ROOT)
+from config import get_county_config
 
-def clean_bad_data():
-    if not os.path.exists(OUTPUT_DIR):
-        print(f"Directory '{OUTPUT_DIR}' does not exist. Nothing to clean.")
+
+def clean_bad_data(output_dir):
+    if not os.path.exists(output_dir):
+        print(f"Directory '{output_dir}' does not exist. Nothing to clean.")
         return
 
     # Find all data.json files in the subdirectories
-    json_files = glob.glob(os.path.join(OUTPUT_DIR, '**', 'data.json'), recursive=True)
+    json_files = glob.glob(os.path.join(output_dir, '**', 'data.json'), recursive=True)
     print(f"Found {len(json_files)} total downloaded properties. Scanning for missing values...\n")
 
     deleted_count = 0
@@ -58,4 +62,10 @@ def clean_bad_data():
     print(f"Remaining clean properties: {len(json_files) - deleted_count}")
 
 if __name__ == "__main__":
-    clean_bad_data()
+    parser = argparse.ArgumentParser(description="Clean bad/incomplete scraped property data")
+    parser.add_argument("--county", default="Travis", help="County name (e.g. Travis, Williamson)")
+    args = parser.parse_args()
+
+    config = get_county_config(args.county)
+    data_dir = os.path.join(PROJECT_ROOT, config["scraped_data_dir"])
+    clean_bad_data(data_dir)

@@ -1,16 +1,20 @@
+import argparse
 import os
 import sqlite3
+import sys
 import pandas as pd
 pd.set_option('display.max_columns', None)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_NAME = os.path.join(PROJECT_ROOT, "tcad_data.db")
+sys.path.insert(0, PROJECT_ROOT)
+from config import get_county_config
 
-def verify_database():
-    print(f"Connecting to {DB_NAME}...\n")
+
+def verify_database(db_name):
+    print(f"Connecting to {db_name}...\n")
     
     try:
-        conn = sqlite3.connect(DB_NAME)
+        conn = sqlite3.connect(db_name)
     except Exception as e:
         print(f"Error connecting to database: {e}")
         return
@@ -75,4 +79,10 @@ def verify_database():
     conn.close()
 
 if __name__ == "__main__":
-    verify_database()
+    parser = argparse.ArgumentParser(description="Verify SQLite database contents")
+    parser.add_argument("--county", default="Travis", help="County name (e.g. Travis, Williamson)")
+    args = parser.parse_args()
+
+    config = get_county_config(args.county)
+    db_path = os.path.join(PROJECT_ROOT, config["db_file"])
+    verify_database(db_path)
