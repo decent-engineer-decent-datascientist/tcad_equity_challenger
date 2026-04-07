@@ -35,6 +35,20 @@ COUNTIES = {
         "search_url": "https://search.wcad.org/ProxyT/Search/Properties/advancedsearch",
         "detail_url_template": "https://search.wcad.org/Property-Detail/PropertyQuickRefID/{property_id}/PartyQuickRefID/{party_id}/SearchTaxYear/{year}",
     },
+    "Fort Bend": {
+        "type": "html",
+        "display_name": "Fort Bend Central Appraisal District (FBCAD)",
+        "short_name": "FBCAD",
+        "db_file": "fbcad_data.db",
+        "scraped_data_dir": "scraped_data/fortbend",
+        "property_link_base": "https://esearch.fbcad.org/Property/View",
+        "link_format": "{base}/{property_id}?year={year}",
+        "has_parcel_data": False,
+        "has_pdf_cards": False,
+        # FBCAD scraping config
+        "search_url": "https://esearch.fbcad.org/Search/SearchResults",
+        "detail_url_template": "https://esearch.fbcad.org/Property/View/{property_id}?year={year}&ownerId={owner_id}",
+    },
 }
 
 # Default tax year - will be derived from data when possible

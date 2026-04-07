@@ -179,12 +179,15 @@ def load_data(db_file, has_parcel_data, property_link_base, link_format, county_
     df['PricePerSqFt'] = df['ownerImprovementValue'] / df['livingArea']
     df['pAccountID'] = df['pAccountID'].astype(str)
 
-    # Build property links dynamically per county
+    # Build property links dynamically per county using link_format from config
     if county_type == "api":
         # TCAD: base/pID/year
         df['property_link'] = property_link_base + "/" + df['pID'].astype(str) + "/" + DEFAULT_YEAR
+    elif link_format == "{base}/{property_id}?year={year}":
+        # FBCAD: base/propertyId?year=YEAR
+        df['property_link'] = property_link_base + "/" + df['pAccountID'] + "?year=" + DEFAULT_YEAR
     else:
-        # WCAD: already has pAccountID as PropertyQuickRefID
+        # WCAD: base/PropertyQuickRefID/PartyQuickRefID/0/SearchTaxYear/YEAR
         df['property_link'] = property_link_base + "/" + df['pAccountID'] + "/PartyQuickRefID/0/SearchTaxYear/" + DEFAULT_YEAR
 
     if 'ownerName' in df.columns:
