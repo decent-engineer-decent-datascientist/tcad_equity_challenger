@@ -141,7 +141,7 @@ def load_data(db_file, has_parcel_data, property_link_base, link_format, county_
     query = f"""
         SELECT
             g.pAccountID, g.pID, g.name AS ownerName, {name_secondary_select}
-            g.streetAddress, g.legalDescription, g.geoID, g.marketArea,
+            g.streetAddress, g.legalDescription, g.geoID, g.marketArea, g.exemptionList,
             v.ownerAppraisedValue, v.ownerImprovementValue, v.ownerLandValue,
             i.livingArea, i.imprvSpecificDescription,
             CASE WHEN CAST(l.sizeSqft AS REAL) > 0 THEN CAST(l.sizeSqft AS REAL)
@@ -193,9 +193,20 @@ def load_data(db_file, has_parcel_data, property_link_base, link_format, county_
         # WCAD: base/PropertyQuickRefID/PartyQuickRefID/0/SearchTaxYear/YEAR
         df['property_link'] = property_link_base + "/" + df['pAccountID'] + "/PartyQuickRefID/0/SearchTaxYear/" + DEFAULT_YEAR
 
+    # Filter builder inventory by exemption status (county-agnostic)
+    if 'exemptionList' in df.columns:
+        df = df[~df['exemptionList'].astype(str).str.upper().str.contains('BUILDER', na=False)]
+
     if 'ownerName' in df.columns:
-        builders = ['TOLL', 'TAYLOR MORRISON', 'PULTE', 'LENNAR', 'DR HORTON', 'D R HORTON', 'MERITAGE', 'KB HOME', 'ASHTON WOODS', 'PERRY HOMES']
-        pattern = '|'.join(builders)
+        # Keywords that indicate builder/developer ownership (not personal LLCs)
+        builder_keywords = ['HOMES', 'BUILDERS', 'CONSTRUCTION', 'COMMUNITIES',
+                            'DEVELOPMENT', 'DEVELOPERS', 'RESIDENTIAL HOLDINGS']
+        # Specific builder names that don't match the keywords above
+        builder_names = ['TOLL', 'TAYLOR MORRISON', 'PULTE', 'LENNAR',
+                         'DR HORTON', 'D R HORTON', 'MERITAGE', 'KB HOME',
+                         'ASHTON WOODS', 'DREES', 'CASTLEROCK', 'CHESMAR',
+                         'SCOTT FELDER', 'SITTERLE', 'BUILDTEQ']
+        pattern = '|'.join(builder_keywords + builder_names)
         mask_primary = df['ownerName'].astype(str).str.upper().str.contains(pattern, na=False)
         mask_combined = mask_primary
         if 'ownerNameSecondary' in df.columns and df['ownerNameSecondary'].notna().any():
