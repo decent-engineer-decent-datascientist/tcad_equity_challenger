@@ -491,8 +491,6 @@ def parse_property_html(html_content, property_quick_ref_id, party_quick_ref_id)
                             "Garage": "GARAGE ATT 1ST F",
                             "Patio": "PATIO",
                             "Fireplace": "FIREPLACE",
-                            "Pool": "POOL RES CONC",
-                            "Spa": "SPA CONCRETE",
                         }
                         detail_type = type_map.get(seg_type, seg_type.upper())
 
@@ -518,6 +516,38 @@ def parse_property_html(html_content, property_quick_ref_id, party_quick_ref_id)
                             "pAccountID": property_quick_ref_id,
                         }
                         imprv_record["details"].append(detail_record)
+
+                        # Emit synthetic detail records for bed/bath/fireplace counts
+                        # so the hedonic regression SQL can find them via LIKE patterns
+                        synthetic_features = []
+                        if bedrooms != "0" and bedrooms:
+                            synthetic_features.append(("BEDROOMS", bedrooms))
+                        if baths != "0" and baths:
+                            # Parse full/half baths from "X.Y" format (e.g. "3.1" = 3 full, 1 half)
+                            bath_parts = baths.split(".")
+                            full_baths = bath_parts[0]
+                            synthetic_features.append(("BATHROOM", full_baths))
+                            if len(bath_parts) > 1 and bath_parts[1] != "0":
+                                synthetic_features.append(("HALF BATHROOM", bath_parts[1]))
+                        if fireplaces != "0" and fireplaces:
+                            synthetic_features.append(("FIREPLACE", fireplaces))
+
+                        for feat_type, feat_area in synthetic_features:
+                            synth_record = {
+                                "pImprovementID": imprv_id,
+                                "pDetailID": f"{imprv_id}_seg_{record_num}_{feat_type.lower().replace(' ', '_')}",
+                                "imprvDetailType": feat_type,
+                                "createDt": "",
+                                "detailTypeDescription": feat_type,
+                                "class": "",
+                                "units": 0,
+                                "effYearBuilt": year_built,
+                                "actualYearBuilt": year_built,
+                                "area": feat_area,
+                                "primaryFeature": None,
+                                "pAccountID": property_quick_ref_id,
+                            }
+                            imprv_record["details"].append(synth_record)
 
         improvement["results"].append(imprv_record)
     data["improvement"] = improvement

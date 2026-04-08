@@ -143,15 +143,18 @@ def load_data(db_file, has_parcel_data, property_link_base, link_format, county_
             g.pAccountID, g.pID, g.name AS ownerName, {name_secondary_select}
             g.streetAddress, g.legalDescription, g.geoID, g.marketArea,
             v.ownerAppraisedValue, v.ownerImprovementValue, v.ownerLandValue,
-            i.livingArea, i.imprvSpecificDescription, l.sizeSqft as lotSizeSqft,
+            i.livingArea, i.imprvSpecificDescription,
+            CASE WHEN CAST(l.sizeSqft AS REAL) > 0 THEN CAST(l.sizeSqft AS REAL)
+                 WHEN CAST(l.sizeAcres AS REAL) > 0 THEN CAST(l.sizeAcres AS REAL) * 43560
+                 ELSE 0 END as lotSizeSqft,
             MAX(d.actualYearBuilt) as yearBuilt, {parcel_select}
-            MAX(CASE WHEN d.detailTypeDescription = 'BATHROOM' THEN d.area ELSE 0 END) as bath_count,
-            MAX(CASE WHEN d.detailTypeDescription = 'HALF BATHROOM' THEN d.area ELSE 0 END) as half_bath_count,
-            MAX(CASE WHEN d.detailTypeDescription = 'BEDROOMS' THEN d.area ELSE 0 END) as bed_count,
-            MAX(CASE WHEN d.detailTypeDescription = 'POOL RES CONC' THEN 1 ELSE 0 END) as has_pool,
-            MAX(CASE WHEN d.detailTypeDescription = 'SPA CONCRETE' THEN 1 ELSE 0 END) as has_spa,
-            MAX(CASE WHEN d.detailTypeDescription = 'OUTDOOR KITCHEN' THEN 1 ELSE 0 END) as has_outdoor_kitchen,
-            MAX(CASE WHEN d.detailTypeDescription = 'FIREPLACE' THEN d.area ELSE 0 END) as fireplace_count,
+            MAX(CASE WHEN d.detailTypeDescription LIKE '%BATHROOM%' AND d.detailTypeDescription NOT LIKE '%HALF%' THEN d.area ELSE 0 END) as bath_count,
+            MAX(CASE WHEN d.detailTypeDescription LIKE '%HALF BATH%' THEN d.area ELSE 0 END) as half_bath_count,
+            MAX(CASE WHEN d.detailTypeDescription LIKE '%BEDROOM%' THEN d.area ELSE 0 END) as bed_count,
+            MAX(CASE WHEN d.detailTypeDescription LIKE '%POOL%' AND d.detailTypeDescription NOT LIKE '%POOL HOUSE%' THEN 1 ELSE 0 END) as has_pool,
+            MAX(CASE WHEN d.detailTypeDescription LIKE '%SPA%' THEN 1 ELSE 0 END) as has_spa,
+            MAX(CASE WHEN d.detailTypeDescription LIKE '%OUTDOOR KITCHEN%' THEN 1 ELSE 0 END) as has_outdoor_kitchen,
+            MAX(CASE WHEN d.detailTypeDescription LIKE '%FIREPLACE%' THEN d.area ELSE 0 END) as fireplace_count,
             SUM(CASE WHEN d.detailTypeDescription LIKE '%GARAGE%' THEN d.area ELSE 0 END) as garage_area
         FROM general g
         LEFT JOIN value_history v ON g.pAccountID = v.pAccountID AND v.pYear = (SELECT MAX(pYear) FROM value_history)
