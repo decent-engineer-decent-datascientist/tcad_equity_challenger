@@ -180,6 +180,8 @@ def load_data(db_file, has_parcel_data, property_link_base, link_format, county_
     df = df[df['ownerImprovementValue'] > 0]
     df = df[df['livingArea'] > 0]
     df['PricePerSqFt'] = df['ownerImprovementValue'] / df['livingArea']
+    df['LandPricePerSqFt'] = df.apply(
+        lambda r: r['ownerLandValue'] / r['lotSizeSqft'] if r['lotSizeSqft'] > 0 else 0, axis=1)
     df['pAccountID'] = df['pAccountID'].astype(str)
 
     # Build property links dynamically per county using link_format from config
@@ -341,6 +343,19 @@ else:
             legal_pool = legal_pool.sort_values(by='Adjusted Imprv Value', ascending=True)
             comps = legal_pool.head(num_comps).copy()
 
+            # --- Land Equity Analysis ---
+            # Compute suggested land value using median land $/sqft from comps
+            comps_with_lot = comps[comps['lotSizeSqft'] > 0]
+            if len(comps_with_lot) >= 3 and subject['lotSizeSqft'] > 0:
+                median_land_per_sqft = comps_with_lot['LandPricePerSqFt'].median()
+                suggested_land_value = median_land_per_sqft * subject['lotSizeSqft']
+                land_method = 'per_sqft'
+            else:
+                # Fallback: use median land value directly (handles WCAD sparse lot data)
+                median_land_per_sqft = 0
+                suggested_land_value = comps['ownerLandValue'].median()
+                land_method = 'median_direct'
+
 # --- CHART GENERATION HELPER ---
 def build_visuals(final_comps, subject, subject_ratio, target_imprv, median_ratio):
     subj_plot = subject.to_dict()
@@ -427,12 +442,13 @@ if app_mode == "Interactive Dashboard":
     st.title(f"⚖️ {short_name} Equity Appraisal Challenger")
     
     st.subheader("Subject Property Details")
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     col1.metric("Total Appraised", f"${subject['ownerAppraisedValue']:,.0f}")
     col2.metric("Improvement Value", f"${subject['ownerImprovementValue']:,.0f}")
-    col3.metric("Living Area", f"{subject['livingArea']:,.0f} SqFt")
-    col4.metric("Lot Size", f"{subject['lotSizeSqft']:,.0f} SqFt")
-    col5.metric("Year Built", f"{subject['yearBuilt']:.0f}")
+    col3.metric("Land Value", f"${subject['ownerLandValue']:,.0f}")
+    col4.metric("Living Area", f"{subject['livingArea']:,.0f} SqFt")
+    col5.metric("Lot Size", f"{subject['lotSizeSqft']:,.0f} SqFt")
+    col6.metric("Year Built", f"{subject['yearBuilt']:.0f}")
     st.divider()
 
     if len(comps) > 0:
@@ -445,13 +461,13 @@ if app_mode == "Interactive Dashboard":
 
         with tab1:
             st.markdown("### Evidence Review & Selection")
-            display_cols = ['property_link', 'streetAddress', 'yearBuilt', 'livingArea', 'ownerAppraisedValue', 'ownerImprovementValue', 'Assessment Ratio', 'Adjusted Imprv Value']
+            display_cols = ['property_link', 'streetAddress', 'yearBuilt', 'livingArea', 'ownerAppraisedValue', 'ownerImprovementValue', 'ownerLandValue', 'Assessment Ratio', 'Adjusted Imprv Value']
             editor_df = comps[display_cols].copy()
             
             # Map exclusions from session state
             editor_df.insert(0, 'Include', ~editor_df['streetAddress'].isin(st.session_state['excluded_comps']))
 
-            rename_map = {'streetAddress': 'Address', 'yearBuilt': 'Year', 'livingArea': 'SqFt', 'ownerAppraisedValue': 'Total Value', 'ownerImprovementValue': 'Imprv Value'}
+            rename_map = {'streetAddress': 'Address', 'yearBuilt': 'Year', 'livingArea': 'SqFt', 'ownerAppraisedValue': 'Total Value', 'ownerImprovementValue': 'Imprv Value', 'ownerLandValue': 'Land Value'}
             editor_df = editor_df.rename(columns=rename_map)
 
             edited_df = st.data_editor(
@@ -459,6 +475,7 @@ if app_mode == "Interactive Dashboard":
                 column_config={
                     "Include": st.column_config.CheckboxColumn("Include", default=True),
                     "property_link": st.column_config.LinkColumn(short_name, display_text="View"),
+                    "Land Value": st.column_config.NumberColumn("Land Value", format="$%d"),
                     "Assessment Ratio": st.column_config.NumberColumn("Assessment Ratio", format="%.2f"),
                     "Adjusted Imprv Value": st.column_config.NumberColumn("Equalized Imprv Value", format="$%d"),
                 },
@@ -474,13 +491,34 @@ if app_mode == "Interactive Dashboard":
             median_comp_ratio = 1.0; suggested_imprv_value = None; suggested_total_value = 0; reduction = 0
             if len(final_comps) > 0:
                 suggested_imprv_value = final_comps['Adjusted Imprv Value'].median()
-                suggested_total_value = suggested_imprv_value + subject['ownerLandValue']
+
+                # Recompute land equity from final (user-filtered) comps
+                fc_with_lot = final_comps[final_comps['lotSizeSqft'] > 0]
+                if len(fc_with_lot) >= 3 and subject['lotSizeSqft'] > 0:
+                    median_land_per_sqft = fc_with_lot['LandPricePerSqFt'].median()
+                    suggested_land_value = median_land_per_sqft * subject['lotSizeSqft']
+                    land_method = 'per_sqft'
+                else:
+                    median_land_per_sqft = 0
+                    suggested_land_value = final_comps['ownerLandValue'].median()
+                    land_method = 'median_direct'
+
+                # Use the lesser of CAD land value and comp-derived land value
+                contested_land_value = min(subject['ownerLandValue'], suggested_land_value)
+                land_reduction = subject['ownerLandValue'] - contested_land_value
+
+                suggested_total_value = suggested_imprv_value + contested_land_value
                 reduction = subject['ownerAppraisedValue'] - suggested_total_value
                 median_comp_ratio = final_comps['Assessment Ratio'].median()
 
                 st.markdown("### 💰 The Bottom Line")
                 if reduction > 0:
                     st.success(f"Based on **{len(final_comps)}** selected properties, your target Equalized Total Value is **${suggested_total_value:,.0f}**.\n\nProposed Reduction: **${reduction:,.0f}**.")
+                    bl_col1, bl_col2, bl_col3 = st.columns(3)
+                    imprv_reduction = subject['ownerImprovementValue'] - suggested_imprv_value
+                    bl_col1.metric("Improvement", f"${suggested_imprv_value:,.0f}", f"-${imprv_reduction:,.0f}" if imprv_reduction > 0 else "No change")
+                    bl_col2.metric("Land", f"${contested_land_value:,.0f}", f"-${land_reduction:,.0f}" if land_reduction > 0 else "No change")
+                    bl_col3.metric("Total", f"${suggested_total_value:,.0f}", f"-${reduction:,.0f}")
                 else:
                     st.error(f"Based on the selected properties, {short_name}'s valuation appears equitable. Target value: **${suggested_total_value:,.0f}**.")
             else:
@@ -526,10 +564,20 @@ if app_mode == "Interactive Dashboard":
             st.write("These adjustments are summed and applied to the comparable property's base assessment to yield the **Equalized Improvement Value** (the assessed value of the comparable property as if it were physically identical to the subject):")
             st.latex(r"\text{Equalized Value}_{comp} = \text{Base " + short_name + r" Value}_{comp} + \sum Adj_i")
 
+            st.markdown("#### Step 4: Land Value Equity Analysis")
+            st.write("In addition to improvement value equalization, the engine performs a separate land equity analysis. The comparable properties' land valuations are used to derive the equitable land value for the subject property:")
+            if mode == "Tax Advocate Strategy (Recommended)" and len(final_comps) > 0:
+                if land_method == 'per_sqft':
+                    st.latex(r"\text{Land Value}_{subject} = \tilde{P}_{land/sqft} \times \text{LotSize}_{subject}")
+                    st.write(f"The median land price per square foot across the selected comparables is **${median_land_per_sqft:,.2f}/sqft**, applied to the subject's lot size of **{subject['lotSizeSqft']:,.0f} sqft**.")
+                else:
+                    st.write("Due to limited lot size data in this county, the median land value of the selected comparables is used directly as the equitable benchmark.")
+                st.write(f"The contested land value is the **lesser** of the current {short_name} land value (${subject['ownerLandValue']:,.0f}) and the comp-derived land value (${suggested_land_value:,.0f}), ensuring we only contest when over-assessed.")
+
         with tab4:
             st.markdown("### 📥 Download Evidence Report")
             if len(final_comps) > 0:
-                export_cols = ['pAccountID', 'property_link', 'ownerName', 'streetAddress', 'legalDescription', 'yearBuilt', 'livingArea', 'lotSizeSqft', 'ownerAppraisedValue', 'PricePerSqFt']
+                export_cols = ['pAccountID', 'property_link', 'ownerName', 'streetAddress', 'legalDescription', 'yearBuilt', 'livingArea', 'lotSizeSqft', 'ownerAppraisedValue', 'ownerImprovementValue', 'ownerLandValue', 'PricePerSqFt', 'LandPricePerSqFt']
                 if 'Total Adjustments' in final_comps.columns:
                     export_cols.extend([f"{f}_adj" for f in hedonic_features] + ['Total Adjustments', 'Adjusted Imprv Value'])
                 export_df = final_comps[export_cols].copy()
@@ -614,7 +662,22 @@ elif app_mode == "Printable Report":
     if len(final_comps) > 0:
         median_comp_ratio = final_comps['Assessment Ratio'].median()
         suggested_imprv_value = final_comps['Adjusted Imprv Value'].median()
-        suggested_total_value = suggested_imprv_value + subject['ownerLandValue']
+
+        # Land equity for printable report
+        rpt_fc_with_lot = final_comps[final_comps['lotSizeSqft'] > 0]
+        if len(rpt_fc_with_lot) >= 3 and subject['lotSizeSqft'] > 0:
+            rpt_median_land_per_sqft = rpt_fc_with_lot['LandPricePerSqFt'].median()
+            rpt_suggested_land_value = rpt_median_land_per_sqft * subject['lotSizeSqft']
+            rpt_land_method = 'per_sqft'
+        else:
+            rpt_median_land_per_sqft = 0
+            rpt_suggested_land_value = final_comps['ownerLandValue'].median()
+            rpt_land_method = 'median_direct'
+
+        contested_land_value = min(subject['ownerLandValue'], rpt_suggested_land_value)
+        land_reduction = subject['ownerLandValue'] - contested_land_value
+
+        suggested_total_value = suggested_imprv_value + contested_land_value
         reduction = subject['ownerAppraisedValue'] - suggested_total_value
         
         fig_map, fig_bar, fig_ratio = build_visuals(final_comps, subject, subject_ratio, suggested_imprv_value, median_comp_ratio)
@@ -636,6 +699,10 @@ elif app_mode == "Printable Report":
         req_col1.metric(f"Current {short_name} Total Value", f"${subject['ownerAppraisedValue']:,.0f}")
         req_col2.metric("Target Equalized Total Value", f"${suggested_total_value:,.0f}")
         req_col3.metric("Reduction Requested", f"${reduction:,.0f}" if reduction > 0 else "$0")
+        imprv_reduction = subject['ownerImprovementValue'] - suggested_imprv_value
+        det_col1, det_col2 = st.columns(2)
+        det_col1.metric("Target Improvement Value", f"${suggested_imprv_value:,.0f}", f"-${imprv_reduction:,.0f}" if imprv_reduction > 0 else "No change")
+        det_col2.metric("Target Land Value", f"${contested_land_value:,.0f}", f"-${land_reduction:,.0f}" if land_reduction > 0 else "No change")
         st.divider()
         
         st.markdown("### III. Comparable Selection Criteria (The \"Universe of Properties\")")
@@ -659,6 +726,14 @@ elif app_mode == "Printable Report":
         st.latex(r"Adj_i = (\text{Subject}_i - \text{Comp}_i) \times \beta_i")
         st.write("These adjustments are summed and applied to the comparable property's base assessment to yield the **Equalized Improvement Value** (the assessed value of the comparable property as if it were physically identical to the subject):")
         st.latex(r"\text{Equalized Value}_{comp} = \text{Base " + short_name + r" Value}_{comp} + \sum Adj_i")
+
+        st.markdown("#### Step 3: Land Value Equity Analysis")
+        if rpt_land_method == 'per_sqft':
+            st.write(f"A separate land equity analysis derives the equitable land value from the median land price per square foot of the comparable properties (**${rpt_median_land_per_sqft:,.2f}/sqft**), applied to the subject's lot size (**{subject['lotSizeSqft']:,.0f} sqft**).")
+            st.latex(r"\text{Land Value}_{subject} = \tilde{P}_{land/sqft} \times \text{LotSize}_{subject}")
+        else:
+            st.write("A separate land equity analysis derives the equitable land value from the median land value of the comparable properties, used directly as the benchmark.")
+        st.write(f"The contested land value is the lesser of the current {short_name} land value (${subject['ownerLandValue']:,.0f}) and the comp-derived land value (${rpt_suggested_land_value:,.0f}).")
         st.divider()
         
         st.markdown("### V. Equity Assessment Ratio Analysis")
@@ -683,11 +758,11 @@ elif app_mode == "Printable Report":
 
         section_num = "VII" if has_parcel else "VI"
         st.markdown(f"### {section_num}. Comparable Analysis Summary")
-        report_table = shuffled_comps[['pAccountID', 'streetAddress', 'livingArea', 'ownerImprovementValue', 'Total Adjustments', 'Adjusted Imprv Value']].copy()
-        report_table.columns = ['Account ID', 'Address', 'SqFt', f'{short_name} Imprv Value', 'Adjustments Applied', 'Equalized Imprv Value']
+        report_table = shuffled_comps[['pAccountID', 'streetAddress', 'livingArea', 'ownerImprovementValue', 'ownerLandValue', 'Total Adjustments', 'Adjusted Imprv Value']].copy()
+        report_table.columns = ['Account ID', 'Address', 'SqFt', f'{short_name} Imprv Value', f'{short_name} Land Value', 'Adjustments Applied', 'Equalized Imprv Value']
         st.dataframe(
             report_table.style.format({
-                f'{short_name} Imprv Value': '${:,.0f}', 'Adjustments Applied': '${:,.0f}', 'Equalized Imprv Value': '${:,.0f}', 'SqFt': '{:,.0f}'
+                f'{short_name} Imprv Value': '${:,.0f}', f'{short_name} Land Value': '${:,.0f}', 'Adjustments Applied': '${:,.0f}', 'Equalized Imprv Value': '${:,.0f}', 'SqFt': '{:,.0f}'
             }), hide_index=True, width="stretch"
         )
         st.divider()
